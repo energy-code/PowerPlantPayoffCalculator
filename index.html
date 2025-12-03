@@ -1,0 +1,537 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Power Plant Financial Modeler</title>
+    
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Chart.js CDN for visualizations -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+
+    <style>
+        /* Custom styles for the range input accent color */
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            appearance: none;
+            width: 16px;
+            height: 16px;
+            background: #3b82f6;
+            cursor: pointer;
+            border-radius: 50%;
+        }
+        input[type="range"]::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            background: #3b82f6;
+            cursor: pointer;
+            border-radius: 50%;
+        }
+        /* Updated style to enforce a taller chart height (600px) */
+        .chart-canvas-height {
+            height: 600px; 
+        }
+    </style>
+</head>
+<body class="bg-slate-50 font-sans">
+    <div id="app" class="min-h-screen p-4 md:p-8 text-slate-800">
+        <div class="max-w-7xl mx-auto mb-8">
+            <h1 class="text-3xl font-bold text-slate-900 flex items-center gap-3">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-amber-500"><path d="M13 2L3 14h9l-1 8 10-12h-9z"/></svg>
+                Power Plant Financial Modeler (Static)
+            </h1>
+            <p class="text-slate-500 mt-2">
+                Calculate project recovery times, incorporating interest during construction. All calculations are performed client-side.
+            </p>
+        </div>
+
+        <div class="max-w-7xl mx-auto grid grid-cols-1 lg:grid-cols-12 gap-6">
+            <!-- INPUTS COLUMN -->
+            <div id="inputs-column" class="lg:col-span-4 space-y-6">
+                <!-- Inputs will be rendered here by JavaScript -->
+            </div>
+
+            <!-- RESULTS COLUMN -->
+            <div class="lg:col-span-8 space-y-6">
+                <!-- Metrics -->
+                <div id="metrics-container" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4"></div>
+
+                <!-- Break Even Results -->
+                <div id="break-even-container" class="grid grid-cols-1 md:grid-cols-2 gap-6"></div>
+
+                <!-- Sensitivity Analysis Charts -->
+                <div id="sensitivity-container">
+                    <h2 class="text-2xl font-bold text-slate-800 my-4 flex items-center gap-2">
+                        <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="text-blue-500"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+                        Sensitivity Analysis (Payback Time in Years)
+                    </h2>
+                    <!-- Chart Wrapper - Now holds 5 charts, using a 2-column grid -->
+                    <div id="chart-wrapper" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <!-- Chart Canvases will be placed here -->
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Global Chart instances to manage updates
+        let capexChartInstance = null;
+        let priceChartInstance = null;
+        let interestChartInstance = null;
+        let durationChartInstance = null;
+        let capacityChartInstance = null;
+
+        // Default Inputs
+        let inputs = {
+            capexMillions: 10000,    // $10,000M
+            tranches: 4,             
+            constructionTime: 7,     // Years
+            interestRate: 4.0,       // % <-- UPDATED TO 4.0%
+            discountRate: 8.0,       // %
+            opexMillions: 206,       // $206M/year
+            capacity: 1100,          // MW
+            capacityFactor: 93,      // %
+            wholesalePrice: 100,     // $/MWh
+            loanTermYears: 30,       // Years
+            profitMargin: 9.6,       // %
+        };
+
+        // --- Helpers and Formatting ---
+
+        /**
+         * Simple DOM element creation utility.
+         */
+        const createElement = (tag, className = '', content = '') => {
+            const el = document.createElement(tag);
+            if (className) el.className = className;
+            if (content) el.innerHTML = content;
+            return el;
+        };
+
+        const formatMoney = (val) => {
+            if (isNaN(val)) return "$0.00"; 
+            if (Math.abs(val) >= 1000000000) return `$${(val / 1000000000).toFixed(2)}B`;
+            if (Math.abs(val) >= 1000000) return `$${(val / 1000000).toFixed(1)}M`;
+            return `$${val.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+        };
+
+        const formatYears = (val) => {
+            if (isNaN(val) || val === Infinity || val > 100) return "Never";
+            const years = Math.floor(val);
+            const months = Math.round((val - years) * 12);
+            return `${years}y ${months}m`;
+        };
+
+        // --- Calculation Logic ---
+        
+        const calculateResults = (params) => {
+            const capexMillions = params.capexMillions || 0;
+            const opexMillions = params.opexMillions || 0;
+            const tranches = params.tranches || 1;
+            const constructionTime = params.constructionTime || 0;
+            const interestRate = params.interestRate || 0;
+            const capacity = params.capacity || 0;
+            const capacityFactor = params.capacityFactor || 0;
+            const wholesalePrice = params.wholesalePrice || 0;
+            const profitMargin = params.profitMargin || 0; 
+
+            const capex = capexMillions * 1000000;
+            const opex = opexMillions * 1000000;
+            const annualHours = 8760;
+            const rateDecimal = interestRate / 100;
+            
+            const annualGenerationMWh = capacity * annualHours * (capacityFactor / 100);
+            const annualRevenue = annualGenerationMWh * wholesalePrice;
+            const annualNCF = annualRevenue - opex;
+
+            const profitReserved = annualRevenue * (profitMargin / 100);
+            const annualAdjustedNCF = annualNCF - profitReserved;
+
+            const trancheSize = capex / (tranches || 1);
+            const timePerTranche = constructionTime / (tranches || 1);
+            
+            let totalProjectCostAtCOD = 0; 
+            
+            for (let i = 0; i < tranches; i++) {
+                const timeCompounding = constructionTime - (i * timePerTranche);
+                // Ensure compounding time is non-negative
+                const timeCompoundingSafe = Math.max(0, timeCompounding); 
+                const futureValue = trancheSize * Math.pow(1 + rateDecimal, timeCompoundingSafe);
+                totalProjectCostAtCOD += futureValue;
+            }
+            const totalIDC = totalProjectCostAtCOD - capex;
+
+            // CapEx only payback (Payback Period = Initial Investment / Annual Cash Flow)
+            const breakEvenCapEx = annualNCF > 0 ? capex / annualNCF : Infinity; 
+            
+            let breakEvenTotal = Infinity;
+            const firstYearInterest = totalProjectCostAtCOD * rateDecimal;
+            let maxBreakEvenRate = Infinity;
+            
+            if (totalProjectCostAtCOD > 0) {
+                maxBreakEvenRate = (annualAdjustedNCF / totalProjectCostAtCOD) * 100;
+            }
+
+            // Payback period (total debt): calculated using the continuous compounding formula for simplicity
+            if (annualAdjustedNCF > firstYearInterest) {
+                const numerator = 1 - (rateDecimal * totalProjectCostAtCOD) / annualAdjustedNCF;
+                // Check for valid log input (must be > 0)
+                if (numerator > 0) {
+                    // Use Math.log to calculate the payback time for growing cash flows
+                    breakEvenTotal = -Math.log(numerator) / rateDecimal;
+                }
+            }
+
+            return {
+                annualRevenue,
+                annualNCF,
+                annualAdjustedNCF,
+                profitReserved,
+                totalIDC,
+                totalProjectCostAtCOD,
+                breakEvenCapEx, 
+                breakEvenTotal, 
+                firstYearInterest,
+                maxBreakEvenRate,
+                isValid: annualAdjustedNCF > 0 && annualAdjustedNCF > firstYearInterest,
+            };
+        };
+
+        // --- UI Rendering Functions (simplified for brevity) ---
+
+        const renderInputSection = (title, elements, iconSVG, borderClass = 'border-l-4 border-l-blue-500') => {
+            const card = createElement('div', `bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden p-5 ${borderClass}`);
+            const titleEl = createElement('h2', 'text-lg font-bold mb-4 flex items-center gap-2', `${iconSVG} ${title}`);
+            card.appendChild(titleEl);
+            
+            const contentWrapper = createElement('div', 'space-y-4');
+            if (Array.isArray(elements)) { 
+                elements.forEach(el => contentWrapper.appendChild(el));
+            }
+
+            card.appendChild(contentWrapper);
+            return card;
+        };
+
+        const renderInputControl = (label, key, min, max, step, unit) => {
+            const container = createElement('div', ''); 
+            
+            const header = createElement('div', 'flex justify-between items-center mb-1');
+            header.appendChild(createElement('label', 'text-xs font-semibold text-slate-500 uppercase tracking-wider flex items-center gap-1', label));
+            header.appendChild(createElement('span', 'text-xs font-mono text-slate-700', unit));
+            container.appendChild(header);
+
+            const controls = createElement('div', 'flex items-center gap-3');
+            
+            const range = createElement('input', 'flex-grow h-2 bg-slate-200 rounded-lg appearance-none cursor-pointer accent-blue-600');
+            range.type = 'range';
+            range.min = min;
+            range.max = max;
+            range.step = step;
+            range.value = inputs[key];
+            range.id = `${key}-range`;
+            range.oninput = (e) => {
+                const val = parseFloat(e.target.value);
+                inputs[key] = val;
+                document.getElementById(`${key}-number`).value = val;
+                updateUI();
+            };
+
+            const number = createElement('input', 'w-24 px-2 py-1 text-right text-sm border border-slate-300 rounded focus:ring-2 focus:ring-blue-500 outline-none');
+            number.type = 'number';
+            number.min = min;
+            number.max = max;
+            number.step = step;
+            number.value = inputs[key];
+            number.id = `${key}-number`;
+            
+            number.oninput = (e) => { 
+                let val = parseFloat(e.target.value);
+                if (val < min) val = min;
+                if (val > max) val = max;
+                inputs[key] = val;
+                document.getElementById(`${key}-range`).value = val;
+                updateUI();
+            };
+
+            controls.appendChild(range);
+            controls.appendChild(number);
+            container.appendChild(controls);
+            
+            return container;
+        };
+
+        const renderMetricBox = (label, value, subtext, iconSVG, color = "blue") => {
+            const colorClasses = {
+                blue: "bg-blue-50 text-blue-600",
+                green: "bg-emerald-50 text-emerald-600",
+                amber: "bg-amber-50 text-amber-600",
+                indigo: "bg-indigo-50 text-indigo-600",
+                red: "bg-red-50 text-red-600",
+            };
+            const box = createElement('div', 'p-4 bg-white rounded-lg border border-slate-100 shadow-sm flex items-start gap-3');
+            box.innerHTML = `
+                <div class="p-2 rounded-lg ${colorClasses[color]}">
+                    ${iconSVG}
+                </div>
+                <div>
+                    <p class="text-xs text-slate-500 font-medium">${label}</p>
+                    <p class="text-xl font-bold text-slate-800">${value}</p>
+                    ${subtext ? `<p class="text-xs text-slate-400 mt-0.5">${subtext}</p>` : ''}
+                </div>
+            `;
+            return box;
+        };
+
+        // --- Charting Logic ---
+
+        const generateChartData = (variedParam, min, max, steps) => {
+            const data = [];
+            const labels = [];
+            const stepSize = (max - min) / steps;
+            
+            // Setting a high cap for nulling out points to handle extremely large numbers
+            const maxTrackedYears = 200; 
+
+            for (let i = 0; i <= steps; i++) {
+                const val = min + (i * stepSize);
+                const tempInputs = { ...inputs, [variedParam]: val };
+                const res = calculateResults(tempInputs);
+                
+                // Use a label that is rounded for display on the X-axis
+                // Use 0 decimal places if value >= 10, otherwise 1 decimal place.
+                labels.push(Number(val.toFixed(val >= 10 || (max - min) > 20 ? 0 : 1)));
+
+                data.push({
+                    x: val,
+                    // If payback is infinite or too long (> maxTrackedYears), use null to create a gap in the line
+                    capexTime: (res.breakEvenCapEx === Infinity || res.breakEvenCapEx > maxTrackedYears) ? null : Number(res.breakEvenCapEx.toFixed(1)),
+                    totalTime: (res.breakEvenTotal === Infinity || res.breakEvenTotal > maxTrackedYears) ? null : Number(res.breakEvenTotal.toFixed(1)),
+                });
+            }
+            return { data, labels };
+        };
+
+        const createChart = (ctx, title, labels, data, dataKey1, dataKey2, xUnit, chartInstance) => {
+            // Destroy existing chart instance if it exists
+            if (chartInstance) {
+                chartInstance.destroy();
+            }
+
+            const chartData = {
+                labels: labels,
+                datasets: [
+                    {
+                        label: 'CapEx Only Payback (Years)',
+                        data: data.map(d => d[dataKey1]),
+                        borderColor: '#059669', // Emerald 600
+                        backgroundColor: 'rgba(5, 150, 105, 0.1)',
+                        tension: 0.3,
+                        pointRadius: 4,
+                        spanGaps: true,
+                    },
+                    {
+                        label: 'Total Debt Payback (Years)',
+                        data: data.map(d => d[dataKey2]),
+                        borderColor: '#3b82f6', // Blue 500
+                        backgroundColor: 'rgba(59, 130, 246, 0.1)',
+                        tension: 0.3,
+                        pointRadius: 4,
+                        spanGaps: true,
+                    }
+                ]
+            };
+
+            const newChartInstance = new Chart(ctx, {
+                type: 'line',
+                data: chartData,
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false, // Aspect Ratio is disabled for custom height
+                    plugins: {
+                        title: {
+                            display: true,
+                            text: title,
+                            font: { size: 16, weight: 'bold' }
+                        },
+                        legend: {
+                            position: 'bottom',
+                        },
+                        tooltip: {
+                             callbacks: {
+                                label: (context) => {
+                                    const value = context.parsed.y;
+                                    return `${context.dataset.label}: ${value !== null ? value.toFixed(1) + 'y' : 'Infinity (>200y)'}`;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: xUnit,
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Payback Time (Years)',
+                            },
+                            beginAtZero: true, 
+                            // The fixed 0-60 year constraints have been removed for auto-scaling.
+                        }
+                    }
+                }
+            });
+            return newChartInstance;
+        };
+
+        const renderCharts = () => {
+            const chartWrapper = document.getElementById('chart-wrapper');
+            chartWrapper.innerHTML = ''; // Clear previous canvases
+
+            // --- Define Chart Generation Parameters (Wider ranges for visibility) ---
+            const chartConfigs = [
+                // 1. CapEx Sensitivity
+                { id: 'capex-chart', title: 'Payback vs. Initial CapEx', param: 'capexMillions', unit: 'CapEx ($ Millions)', min: 5000, max: 15000, steps: 8, instance: capexChartInstance, setInstance: (i) => capexChartInstance = i },
+                // 2. Wholesale Price Sensitivity
+                { id: 'price-chart', title: 'Payback vs. Wholesale Price', param: 'wholesalePrice', unit: 'Price ($/MWh)', min: 50, max: 150, steps: 8, instance: priceChartInstance, setInstance: (i) => priceChartInstance = i },
+                // 3. Interest Rate Sensitivity
+                { id: 'interest-chart', title: 'Payback vs. Interest Rate', param: 'interestRate', unit: 'Interest Rate (%)', min: 1, max: 12, steps: 8, instance: interestChartInstance, setInstance: (i) => interestChartInstance = i },
+                // 4. Construction Duration Sensitivity
+                { id: 'duration-chart', title: 'Payback vs. Construction Duration', param: 'constructionTime', unit: 'Duration (Years)', min: 1, max: 15, steps: 8, instance: durationChartInstance, setInstance: (i) => durationChartInstance = i },
+                // 5. Capacity Factor Sensitivity
+                { id: 'capacity-chart', title: 'Payback vs. Capacity Factor', param: 'capacityFactor', unit: 'Capacity Factor (%)', min: 70, max: 100, steps: 8, instance: capacityChartInstance, setInstance: (i) => capacityChartInstance = i },
+            ];
+
+            chartConfigs.forEach(config => {
+                const minVal = config.min;
+                const maxVal = config.max;
+                const steps = config.steps;
+
+                const { data, labels } = generateChartData(config.param, minVal, maxVal, steps);
+
+                const card = createElement('div', 'bg-white rounded-xl shadow-md p-4');
+                // The 'chart-canvas-height' class enforces the 600px height via CSS
+                const canvas = createElement('canvas', 'chart-canvas-height', ''); 
+                canvas.id = config.id;
+                card.appendChild(canvas);
+                chartWrapper.appendChild(card);
+                
+                config.setInstance(createChart(
+                    canvas.getContext('2d'), 
+                    config.title, 
+                    labels, 
+                    data, 
+                    'capexTime', 
+                    'totalTime', 
+                    config.unit, 
+                    config.instance
+                ));
+            });
+        };
+        
+        // --- Core UI Update Function ---
+
+        const updateUI = () => {
+            const results = calculateResults(inputs);
+            
+            // --- 1. Render Inputs ---
+            const inputsColumn = document.getElementById('inputs-column');
+            inputsColumn.innerHTML = ''; 
+            
+            // SVG Icons for cards
+            const dollarSVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" x2="12" y1="2" y2="22"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>`;
+            const activitySVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12H18l-3 9L9 3l-3 9H2"/></svg>`;
+            const clockSVG = `<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>`;
+
+            // Financial Card (Using element appending for controls)
+            const financialControls = [
+                renderInputControl('Capital Expenditure (CapEx)', 'capexMillions', 100, 20000, 10, '$ Millions'),
+                renderInputControl('Annual OpEx', 'opexMillions', 0.1, 1000, 0.1, '$ Millions'),
+                renderInputControl('Interest Rate', 'interestRate', 0, 20, 0.1, '%'),
+                renderInputControl('Loan Term (Post-COD)', 'loanTermYears', 5, 50, 1, 'Years'),
+                renderInputControl('Discount Rate', 'discountRate', 0, 20, 0.1, '%'),
+            ];
+            inputsColumn.appendChild(renderInputSection('Financial & Debt Inputs', financialControls, dollarSVG, 'border-l-4 border-l-blue-500'));
+
+            // Profit Card
+            const profitControls = [
+                renderInputControl('Profit Margin (of Revenue)', 'profitMargin', 0, 50, 0.1, '%')
+            ];
+            inputsColumn.appendChild(renderInputSection('Profit Requirements', profitControls, activitySVG, 'border-l-4 border-l-purple-500'));
+            
+            // Construction Card
+            const constructionControls = [
+                renderInputControl('Construction Duration', 'constructionTime', 0.5, 15, 0.5, 'Years'),
+                renderInputControl('Capital Tranches', 'tranches', 1, 12, 1, '#')
+            ];
+            inputsColumn.appendChild(renderInputSection('Construction', constructionControls, clockSVG, 'border-l-4 border-l-amber-500'));
+
+            // Operational Specs
+            const operationalControls = [
+                renderInputControl('Capacity', 'capacity', 1, 2000, 1, 'MW'),
+                renderInputControl('Capacity Factor', 'capacityFactor', 5, 100, 1, '%'),
+                renderInputControl('Wholesale Price', 'wholesalePrice', 1, 500, 1, '$/MWh')
+            ];
+            inputsColumn.appendChild(renderInputSection('Operational Specs', operationalControls, activitySVG, 'border-l-4 border-l-emerald-500'));
+
+            
+            // --- 2. Render Metrics ---
+            const metricsContainer = document.getElementById('metrics-container');
+            metricsContainer.innerHTML = '';
+            
+            const trendingUpSVG = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 7 13.5 15.5 10 12 2 21"/><polyline points="16 7 22 7 22 13"/></svg>`;
+            const alertCircleSVG = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" x2="12" y1="8" y2="12"/><line x1="12" x2="12.01" y1="16" y2="16"/></svg>`;
+            const calculatorSVG = `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="20" height="20" x="2" y="2" rx="2" ry="2"/><line x1="8" x2="16" y1="6" y2="6"/><line x1="16" x2="16" y1="14" y2="18"/><line x1="8" x2="8" y1="14" y2="18"/><line x1="12" x2="12" y1="14" y2="18"/></svg>`;
+            
+            metricsContainer.appendChild(renderMetricBox('Gross NCF (Rev - OpEx)', formatMoney(results.annualNCF), `Less ${formatMoney(results.profitReserved)} profit`, trendingUpSVG, 'blue'));
+            metricsContainer.appendChild(renderMetricBox('Annual Profit Reserved', `${inputs.profitMargin}%`, `Equals ${formatMoney(results.profitReserved)}/yr`, alertCircleSVG, 'amber'));
+            metricsContainer.appendChild(renderMetricBox('Adjusted NCF', formatMoney(results.annualAdjustedNCF), results.annualAdjustedNCF <= results.firstYearInterest ? "RISK: Debt may grow" : "Debt Service", dollarSVG, results.annualAdjustedNCF > results.firstYearInterest ? "green" : "red"));
+            metricsContainer.appendChild(renderMetricBox('Total Debt at COD', formatMoney(results.totalProjectCostAtCOD), `Incl. ${formatMoney(results.totalIDC)} IDC`, calculatorSVG, 'indigo'));
+
+            
+            // --- 3. Render Break Even ---
+            const breakEvenContainer = document.getElementById('break-even-container');
+            breakEvenContainer.innerHTML = '';
+
+            const cardCapEx = createElement('div', 'p-6 bg-gradient-to-br from-white to-teal-50 border-teal-200 rounded-xl shadow-sm border');
+            cardCapEx.innerHTML = `
+                <h3 class="text-sm font-semibold text-teal-800 uppercase tracking-wide">Break Even: CapEx Only</h3>
+                <div class="mt-2 text-4xl font-bold text-slate-800">${formatYears(results.breakEvenCapEx)}</div>
+            `;
+            breakEvenContainer.appendChild(cardCapEx);
+
+            const cardTotalDebt = createElement('div', 'p-6 bg-gradient-to-br from-white to-blue-50 border-blue-200 rounded-xl shadow-sm border');
+            let totalDebtContent = `
+                <h3 class="text-sm font-semibold text-blue-800 uppercase tracking-wide">Break Even: Total Debt</h3>
+                <div class="mt-2 text-4xl font-bold text-slate-800">${formatYears(results.breakEvenTotal)}</div>
+            `;
+            if (results.breakEvenTotal === Infinity || results.annualAdjustedNCF <= results.firstYearInterest) {
+                totalDebtContent += `
+                    <div class="mt-2">
+                        <span class="block text-red-500 font-medium text-xs">Debt is growing indefinitely.</span>
+                        <span class="block text-xs text-slate-800 font-semibold mt-1">Max sustainable rate: <span class="text-red-600">${results.maxBreakEvenRate.toFixed(2)}%</span></span>
+                    </div>
+                `;
+            }
+            cardTotalDebt.innerHTML = totalDebtContent;
+            breakEvenContainer.appendChild(cardTotalDebt);
+
+            // --- 4. Render Sensitivity Charts ---
+            renderCharts();
+        };
+        
+        // --- Initialization ---
+
+        window.onload = () => {
+            updateUI();
+        };
+
+    </script>
+</body>
+</html>
